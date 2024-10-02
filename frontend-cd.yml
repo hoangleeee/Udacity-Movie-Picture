@@ -1,0 +1,96 @@
+name: FE CD Workflow
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "starter/frontend/**"
+
+env:
+  EKS_CLUSTER_NAME: cluster
+
+jobs:
+  lint:
+    name: Run Lint FE
+    runs-on: ubuntu-latest
+    defaults: 
+      run:
+        working-directory: starter/frontend/
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4  # Step 1: Check out the code from the repository.
+
+      - name: Set up Node.js 
+        uses: actions/setup-node@v4
+        with:
+          node-version: latest  # Step 2: Set up the latest version of Node.js.
+
+      - name: Install dependencies
+        run: npm ci  # Step 3: Install project dependencies.
+
+      - name: Run the linter
+        run: npm run lint  # Step 4: Execute the linter to check for code quality issues.
+
+  test:
+    name: Run Test FE
+    runs-on: ubuntu-latest
+    defaults: 
+      run:
+        working-directory: starter/
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4  # Step 1: Check out the code from the repository.
+
+      - name: Install dependencies
+        run: cd frontend && npm ci  # Step 2: Install dependencies for the frontend.
+
+      - name: Run tests
+        run: cd frontend && npm test  # Step 3: Execute tests to validate the frontend code.
+
+  build:
+    name: Build and Run FE
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    defaults: 
+      run:
+        working-directory: starter/
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4  # Step 1: Check out the code from the repository.
+
+      - name: Install dependencies
+        run: cd frontend && npm ci  # Step 2: Install dependencies for the frontend.
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1  # Step 3: Authenticate to Amazon Elastic Container Registry.
+
+      - name: Build, Tag, and Push Image to Amazon ECR
+        run: |
+          cd frontend && docker build --tag=$ECR_REGISTRY/$ECR_REPOSITORY:${{ github.sha }} .  # Step 4: Build and tag the Docker image.
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:${{ github.sha }}  # Step 5: Push the Docker image to Amazon ECR.
+
+  deploy:
+    name: Deploy to EKS
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3  # Step 1: Check out the code from the repository.
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4.0.2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}  # Step 2: Configure AWS credentials for deployment.
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: us-east-1
+
+      - name: Get Cluster Certificate
+        run: aws eks update-kubeconfig --name ${{ env.EKS_CLUSTER_NAME }}  # Step 3: Update kubeconfig to connect to the EKS cluster.
+
+      - name: Apply the Manifests to the Cluster
+        working-directory: starter/frontend/k8s
+        run: kustomize build | kubectl apply --validate=false -f -  # Step 4: Deploy the application using Kubernetes manifests.
