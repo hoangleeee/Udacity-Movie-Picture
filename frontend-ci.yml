@@ -1,0 +1,171 @@
+name: Frontend CI Workflow
+
+# Triggers the workflow when manually dispatched or on pull request closure to the main branch, only affecting frontend changes.
+on:
+  workflow_dispatch:
+  pull_request:
+    types:
+      - closed
+    branches:
+      - main
+    paths:
+      - "starter/frontend/**"
+
+jobs:
+  lint:
+    name: run lint FE
+    runs-on: ubuntu-latest
+    defaults: 
+      run:
+        working-directory: starter/frontend/    
+    steps:
+      # Step 1: Checkout the repository code
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Step 2: Set up Node.js environment
+      - name: Set up Node.js 
+        uses: actions/setup-node@v4
+        with:
+          node-version: latest
+
+      # Step 3: Cache node modules to speed up subsequent runs
+      - name: Cache node modules
+        id: cache-npm
+        uses: actions/cache@v3
+        env:
+          cache-name: cache-node-modules
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-build-${{ env.cache-name }}-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-build-${{ env.cache-name }}-
+            ${{ runner.os }}-build-
+            ${{ runner.os }}-
+      
+      # Step 4: Install project dependencies
+      - name: Install dependencies
+        run: npm ci
+
+      # Step 5: Run ESLint to ensure code quality
+      - name: Run the linter
+        run: npm run lint
+
+  test:
+    name: run test FE
+    runs-on: ubuntu-latest
+    defaults: 
+      run:
+        working-directory: starter/
+    steps:
+      # Step 1: Checkout the repository code
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      # Step 2: Set up Node.js environment
+      - name: Set up Node.js 
+        uses: actions/setup-node@v4
+        with:
+          node-version: latest
+
+      # Step 3: Cache node modules to speed up subsequent runs
+      - name: Cache node modules
+        id: cache-npm
+        uses: actions/cache@v3
+        env:
+          cache-name: cache-node-modules
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-build-${{ env.cache-name }}-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-build-${{ env.cache-name }}-
+            ${{ runner.os }}-build-
+            ${{ runner.os }}-
+
+      # Step 4: Install project dependencies inside the frontend folder
+      - name: Install dependencies
+        run: cd frontend && npm ci
+  
+      # Step 5: Run tests to ensure functionality
+      - name: Run tests
+        run: cd frontend && npm test 
+
+  build:
+    name: build and run FE
+    needs: [lint, test]
+    defaults: 
+      run:
+        working-directory: starter/
+    runs-on: ubuntu-latest
+    steps:
+      # Step 1: Checkout the repository code
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Step 2: Set up Node.js environment
+      - name: Set up Node.js 
+        uses: actions/setup-node@v4
+        with:
+          node-version: latest
+
+      # Step 3: Cache node modules to speed up subsequent runs
+      - name: Cache node modules
+        id: cache-npm
+        uses: actions/cache@v3
+        env:
+          cache-name: cache-node-modules
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-build-${{ env.cache-name }}-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-build-${{ env.cache-name }}-
+            ${{ runner.os }}-build-
+            ${{ runner.os }}-
+
+      # Step 4: Install project dependencies inside the frontend folder
+      - name: Install dependencies
+        run: cd frontend && npm ci
+
+      # Step 5: Clear AWS credentials (cleanup)
+      - name: cleanup
+        run: |
+          unset AWS_DEFAULT_REGION
+          unset AWS_REGION
+          unset AWS_ACCESS_KEY_ID
+          unset AWS_SECRET_ACCESS_KEY
+          unset AWS_SESSION_TOKEN
+
+      # Step 6: Set up AWS credentials
+      - name: setup aws
+        uses: aws-actions/configure-aws-credentials@v4.0.2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: us-east-1
+
+      # Step 7: Log in to Amazon ECR (Elastic Container Registry)
+      - name: login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      # Step 8: Build the Docker image, tag it, and push to Amazon ECR
+      - name: build, tag, and push image to Amazon ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: frontend
+          IMAGE_TAG: latest
+          REACT_APP_MOVIE_API_URL: http://localhost:5000 
+        run: |
+          cd frontend &&  docker build --build-arg=REACT_APP_MOVIE_API_URL --tag=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker images
+      
+      # Step 9: Cache Docker layers for faster builds in the future
+      - name: cache Docker layers
+        uses: actions/cache@v3
+        with:
+          path: ~/.docker/cache
+          key: ${{ runner.os }}-docker-cache-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-docker-cache-
