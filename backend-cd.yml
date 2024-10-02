@@ -1,0 +1,181 @@
+name: BE CD Workflow
+
+on:
+  workflow_dispatch: # Allow manual trigger
+  push:
+    branches:
+      - main
+    paths:
+      - "starter/backend/**"  # Only trigger on changes in the backend folder
+
+env:
+  PYTHON_VERSION: 3.11  # Specify Python version
+  EKS_CLUSTER_NAME: cluster  # EKS cluster name for deployment
+
+jobs:
+  lint:
+    name: run lint BE
+    runs-on: ubuntu-latest
+    defaults: 
+      run:
+        working-directory: starter/backend/  # Set working directory to backend folder
+    steps:
+      - name: checkout code
+        uses: actions/checkout@v3  # Step 1: Checkout the latest code from the repository
+
+      - name: cache pipenv environment
+        uses: actions/cache@v2  # Step 2: Cache pipenv environment to speed up subsequent jobs
+        with:
+          path: |
+            ~/.local/share/virtualenvs
+            .venv
+          key: ${{ runner.os }}-pipenv-${{ hashFiles('**/Pipfile.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-pipenv-
+
+      - name: setup python environment
+        uses: actions/setup-python@v4  # Step 3: Set up Python environment
+        with: 
+          python-version: ${{env.PYTHON_VERSION}}
+
+      - name : install dependencies
+        run: |
+          pip install pipenv  # Step 4: Install pipenv for dependency management
+          pipenv install  # Install project dependencies
+          pip install flake8  # Install flake8 for linting
+
+      - name: run lint
+        run: pipenv run lint  # Step 5: Run linting with flake8
+
+  test:
+    name: run test BE
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: starter/backend/  # Set working directory to backend folder
+    steps:
+      - name: checkout code
+        uses: actions/checkout@v3  # Step 1: Checkout the latest code from the repository
+
+      - name: cache pipenv environment
+        uses: actions/cache@v2  # Step 2: Cache pipenv environment
+        with:
+          path: |
+            ~/.local/share/virtualenvs
+            .venv
+          key: ${{ runner.os }}-pipenv-${{ hashFiles('**/Pipfile.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-pipenv-
+
+      - name: setup python environment
+        uses: actions/setup-python@v4  # Step 3: Set up Python environment
+        with: 
+          python-version: ${{env.PYTHON_VERSION}}
+      
+      - name : install dependencies
+        run: |
+          pip install pipenv  # Step 4: Install pipenv
+          pipenv install  # Install project dependencies
+          pip install flake8  # Install flake8
+
+      - name: run tests
+        run: pipenv run test  # Step 5: Run tests with pipenv
+
+  build:
+    name: build and run BE
+    needs: [lint, test]  # Step 0: This job will run after the 'lint' and 'test' jobs are successful
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: starter/backend/  # Set working directory to backend folder
+    steps:
+      - name: checkout code
+        uses: actions/checkout@v3  # Step 1: Checkout the latest code from the repository
+
+      - name: cache pipenv environment
+        uses: actions/cache@v2  # Step 2: Cache pipenv environment
+        with:
+          path: |
+            ~/.local/share/virtualenvs
+            .venv
+          key: ${{ runner.os }}-pipenv-${{ hashFiles('**/Pipfile.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-pipenv-
+
+      - name: setup python environment
+        uses: actions/setup-python@v4  # Step 3: Set up Python environment
+        with: 
+          python-version: ${{env.PYTHON_VERSION}}
+
+      - name : install dependencies
+        run: |
+          pip install pipenv  # Step 4: Install pipenv
+          pipenv install  # Install project dependencies
+          pip install flake8  # Install flake8
+
+      - name: setup aws
+        uses: aws-actions/configure-aws-credentials@v4.0.2  # Step 5: Configure AWS credentials
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: us-east-1
+
+      - name: login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1  # Step 6: Log in to Amazon Elastic Container Registry (ECR)
+
+      - name: build, tag, and push image to Amazon ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: backend
+        run: |
+          git_sha=$(git rev-parse --short HEAD)  # Step 7: Build Docker image
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$git_sha .  # Build image
+          docker images  # List Docker images
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$git_sha  # Step 8: Push image to ECR
+      
+  deploy:
+    name: deploy to EKS
+    needs: build  # Step 0: This job runs after the 'build' job is successful
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: starter/backend/  # Set working directory to backend folder
+    steps:
+      - name: checkout code
+        uses: actions/checkout@v3  # Step 1: Checkout the latest code from the repository
+
+      - name: configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4.0.2  # Step 2: Configure AWS credentials for deploying to EKS
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: us-east-1
+
+      - name: login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1  # Step 3: Log in to Amazon ECR
+      
+      - name: get cluster certificate
+        run: |
+          aws eks update-kubeconfig --name ${{ env.EKS_CLUSTER_NAME }}  # Step 4: Get the Kubernetes cluster certificate
+
+      - name: add github action user to kubernetes
+        working-directory: setup
+        run: |
+          ./init.sh || true  # Step 5: Run initialization script to set up permissions (if needed)
+
+      - name: set docker image for kustomize
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          REPOSITORY: backend
+        working-directory: starter/backend/k8s
+        run: |
+          git_sha=$(git rev-parse --short HEAD)  # Step 6: Set Docker image in Kubernetes manifests
+          kustomize edit set image backend=$REGISTRY/$REPOSITORY:$git_sha
+      
+      - name: apply the manifests to the cluster
+        working-directory: starter/backend/k8s
+        run: kustomize build | kubectl apply --validate=false -f -  # Step 7: Deploy the updated manifests to the Kubernetes cluster
